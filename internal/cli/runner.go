@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/idilsaglam/todo/internal/model"
@@ -317,6 +318,10 @@ type modelTUI struct {
 	list     list.Model
 	changed  bool
 	itemsRef *[]model.Item // pointer to original slice to write back updates
+
+	adding bool            // true when inline add is active
+	ti     textinput.Model // text input model for adding
+	addErr string          // last add validation error (shown briefly)
 }
 
 // Custom delegate to control how items render (single line)
@@ -379,13 +384,22 @@ func runInteractiveList(items []model.Item, opt Options) error {
 	l.Styles.PaginationStyle = helpStyle
 	l.FilterInput.Prompt = "/ "
 	l.SetStatusBarItemName("item", "items")
-	l.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{kb.Toggle, kb.Delete, kb.Quit} }
-	l.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{kb.Toggle, kb.Delete, kb.Quit} }
+
+	// Extend help with the new Add key binding
+	addBind := key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add"))
+	l.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{addBind, kb.Toggle, kb.Delete, kb.Quit} }
+	l.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{addBind, kb.Toggle, kb.Delete, kb.Quit} }
 
 	m := modelTUI{
 		list:     l,
 		itemsRef: &items,
 	}
+	// set up text input for inline add
+	m.ti = textinput.New()
+	m.ti.Prompt = "> "
+	m.ti.Placeholder = "New item title..."
+	m.ti.CharLimit = 200
+	m.ti.Focus() // not adding yet, but ensures cursor works when activated
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	finalModel, err := p.Run()
@@ -417,6 +431,35 @@ func runInteractiveList(items []model.Item, opt Options) error {
 func (m modelTUI) Init() tea.Cmd { return nil }
 
 func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// When in add mode, most keys go to the text input first
+	if m.adding {
+		var cmd tea.Cmd
+		switch x := msg.(type) {
+		case tea.KeyMsg:
+			switch x.String() {
+			case "enter":
+				title := strings.TrimSpace(m.ti.Value())
+				if title == "" {
+					m.addErr = "Title cannot be empty"
+					return m, nil
+				}
+				// append to list
+				m.list.InsertItem(m.list.Index()+1, listItem{Text: title, Done: false})
+				m.changed = true
+				// reset input and exit add mode
+				m.ti.SetValue("")
+				m.adding = false
+				return m, nil
+			case "esc":
+				m.adding = false
+				m.ti.SetValue("")
+				return m, nil
+			}
+		}
+		m.ti, cmd = m.ti.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -440,6 +483,11 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.changed = true
 			}
 			return m, nil
+		case "a":
+			m.adding = true
+			m.ti.SetValue("")
+			m.ti.Placeholder = "New item title..."
+			return m, nil
 		}
 	}
 	var cmd tea.Cmd
@@ -450,8 +498,28 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m modelTUI) View() string {
 	// Resize to terminal size every render
 	w, h := widthHeight()
-	m.list.SetSize(w-2, h-4)
-	return panelString(m.list.View())
+	// Leave space for the inline add bar when active
+	listHeight := h - 4
+	if m.adding {
+		listHeight = h - 6
+	}
+	m.list.SetSize(w-2, listHeight)
+
+	// Base view
+	content := m.list.View()
+
+	// Inline add bar
+	if m.adding {
+		bar := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(0, 1)
+		title := "Add new item"
+		if m.addErr != "" {
+			title += " — " + errorStyle.Render(m.addErr)
+		}
+		inputLine := title + "\n" + m.ti.View()
+		content = content + "\n" + bar.Render(inputLine)
+	}
+
+	return panelString(content)
 }
 
 // helpers for View
