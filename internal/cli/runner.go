@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -29,9 +30,24 @@ var (
 	accentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
 	mutedStyle   = lipgloss.NewStyle().Faint(true)
 	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+
+	selectedStyle = lipgloss.NewStyle().Bold(true).Reverse(true)
+	doneStyle     = lipgloss.NewStyle().Faint(true).Strikethrough(true)
+	helpStyle     = lipgloss.NewStyle().Faint(true)
+
 	boxChecked   = "☑"
 	boxUnchecked = "☐"
 )
+
+var kb = struct {
+	Toggle key.Binding
+	Delete key.Binding
+	Quit   key.Binding
+}{
+	Toggle: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle done")),
+	Delete: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "delete")),
+	Quit:   key.NewBinding(key.WithKeys("q", "esc"), key.WithHelp("q/esc", "quit & save")),
+}
 
 func ok(msg string) {
 	fmt.Println(successStyle.Render("✔ " + msg))
@@ -286,11 +302,10 @@ type listItem struct {
 
 func (i listItem) TitleText() string {
 	box := boxUnchecked
-	style := mutedStyle
 	if i.Done {
-		box, style = boxChecked, successStyle
+		box = boxChecked
 	}
-	return fmt.Sprintf("%s %s", style.Render(box), i.Text)
+	return fmt.Sprintf("%s %s", box, i.Text)
 }
 
 // Implement list.Item interface
@@ -312,13 +327,27 @@ func (d itemDelegate) Spacing() int                              { return 0 }
 func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
 func (d itemDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
 	it, _ := item.(listItem)
-	line := it.TitleText()
-	if index == m.Index() {
-		line = lipgloss.NewStyle().Bold(true).Render("> " + it.TitleText())
-	} else {
-		line = "  " + line
+	raw := it.TitleText() // e.g. "☐ Buy milk"
+	// split into box and text so we style them separately
+	space := strings.Index(raw, " ")
+	if space < 0 {
+		space = len(raw)
 	}
-	fmt.Fprintln(w, line)
+	box, text := raw[:space], strings.TrimSpace(raw[space:])
+
+	boxStyled := mutedStyle.Render(box)
+	textStyled := text
+	if it.Done {
+		boxStyled = successStyle.Render(boxChecked)
+		textStyled = doneStyle.Render(text)
+	}
+
+	line := fmt.Sprintf("%s %s", boxStyled, textStyled)
+	prefix := "  "
+	if index == m.Index() {
+		prefix = selectedStyle.Render("> ")
+	}
+	fmt.Fprintln(w, prefix+line)
 }
 
 // runInteractiveList starts the Bubble Tea list and persists changes when quitting.
@@ -330,10 +359,28 @@ func runInteractiveList(items []model.Item, opt Options) error {
 	}
 
 	l := list.New(li, itemDelegate{}, 0, 0)
-	l.Title = "Todos"
+
+	// Header title with live counts
+	dn, pn := stats(items)
+	ltitle := fmt.Sprintf("%s   %s %d  %s %d  %s %d",
+		titleStyle.Render("Todos"),
+		successStyle.Render("✔"), dn,
+		pendingStyle.Render("•"), pn,
+		accentStyle.Render("Total"), len(items),
+	)
+
+	l.Title = ltitle
 	l.SetShowHelp(true)
+	l.SetShowPagination(true)
+	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
 	l.Styles.Title = titleStyle
+	l.Styles.HelpStyle = helpStyle
+	l.Styles.PaginationStyle = helpStyle
+	l.FilterInput.Prompt = "/ "
+	l.SetStatusBarItemName("item", "items")
+	l.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{kb.Toggle, kb.Delete, kb.Quit} }
+	l.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{kb.Toggle, kb.Delete, kb.Quit} }
 
 	m := modelTUI{
 		list:     l,
@@ -341,14 +388,19 @@ func runInteractiveList(items []model.Item, opt Options) error {
 	}
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		return err
+	}
+	fm, okModel := finalModel.(modelTUI)
+	if !okModel {
+		return nil
 	}
 
 	// Write back list state to items and persist if changed
-	if m.changed {
-		out := make([]model.Item, 0, len(m.list.Items()))
-		for _, it := range m.list.Items() {
+	if fm.changed {
+		out := make([]model.Item, 0, len(fm.list.Items()))
+		for _, it := range fm.list.Items() {
 			if li, ok := it.(listItem); ok {
 				out = append(out, model.Item{Title: li.Text, Done: li.Done})
 			}
