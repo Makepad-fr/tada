@@ -6,15 +6,56 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/idilsaglam/todo/internal/model"
 	"github.com/idilsaglam/todo/internal/store/jsonstore"
-	"github.com/idilsaglam/todo/internal/ui"
 )
 
 // Options tune output behavior from root flags.
 type Options struct {
 	Group bool // list grouped by pending/done
 }
+
+// ------- minimal styling helpers (Lip Gloss) -------
+var (
+	titleStyle   = lipgloss.NewStyle().Bold(true)
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	pendingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	accentStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("12"))
+	mutedStyle   = lipgloss.NewStyle().Faint(true)
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("9")).Bold(true)
+	boxChecked   = "☑"
+	boxUnchecked = "☐"
+)
+
+func ok(msg string) {
+	fmt.Println(successStyle.Render("✔ " + msg))
+}
+func fail(msg string) {
+	fmt.Fprintln(os.Stderr, errorStyle.Render("✖ "+msg))
+}
+func panel(lines []string) {
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1)
+	fmt.Println(border.Render(strings.Join(lines, "\n")))
+}
+func progressBar(done, total, width int) string {
+	if total == 0 {
+		total = 1
+	}
+	if width <= 0 {
+		width = 28
+	}
+	filled := int(float64(done) / float64(total) * float64(width))
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + fmt.Sprintf("] %d/%d", done, total)
+}
+
+// ---------------------------------------------------
 
 // Run dispatches subcommands and returns an exit code (0 ok, 1 error, 2 usage).
 func Run(args []string, opt Options) int {
@@ -34,37 +75,37 @@ func Run(args []string, opt Options) int {
 
 	case "add":
 		if len(a) == 0 {
-			ui.Fail("usage: todo add <title...>")
+			fail("usage: todo add <title...>")
 			return 2
 		}
 		return doAdd(strings.Join(a, " "))
 
 	case "done":
 		if len(a) != 1 {
-			ui.Fail("usage: todo done <index>")
+			fail("usage: todo done <index>")
 			return 2
 		}
 		n, err := strconv.Atoi(a[0])
 		if err != nil {
-			ui.Fail("done: not a number: " + a[0])
+			fail("done: not a number: " + a[0])
 			return 2
 		}
 		return doToggle(n)
 
 	case "rm":
 		if len(a) != 1 {
-			ui.Fail("usage: todo rm <index>")
+			fail("usage: todo rm <index>")
 			return 2
 		}
 		n, err := strconv.Atoi(a[0])
 		if err != nil {
-			ui.Fail("rm: not a number: " + a[0])
+			fail("rm: not a number: " + a[0])
 			return 2
 		}
 		return doRemove(n)
 	}
 
-	ui.Fail("unknown subcommand: " + cmd)
+	fail("unknown subcommand: " + cmd)
 	fmt.Fprintln(os.Stderr)
 	PrintHelp()
 	return 2
@@ -95,22 +136,22 @@ Examples:
 func doList(opt Options) int {
 	items, err := jsonstore.Load()
 	if err != nil {
-		ui.Fail("load: " + err.Error())
+		fail("load: " + err.Error())
 		return 1
 	}
 
 	// Header + progress
 	d, p := stats(items)
 	header := fmt.Sprintf("%s  %s %d  %s %d  %s %d",
-		ui.C(ui.Current().Title, "Todos"),
-		ui.C(ui.Current().Success, "✔"), d,
-		ui.C(ui.Current().Pending, "•"), p,
-		ui.C(ui.Current().Accent, "Total"), len(items),
+		titleStyle.Render("Todos"),
+		successStyle.Render("✔"), d,
+		pendingStyle.Render("•"), p,
+		accentStyle.Render("Total"), len(items),
 	)
 
 	var lines []string
 	lines = append(lines, header)
-	lines = append(lines, ui.C(ui.Current().Muted, ui.ProgressBar(d, d+p, 28)))
+	lines = append(lines, mutedStyle.Render(progressBar(d, d+p, 28)))
 	lines = append(lines, "")
 
 	if opt.Group {
@@ -119,70 +160,70 @@ func doList(opt Options) int {
 		lines = append(lines, flatLines(items)...)
 	}
 	lines = append(lines, "")
-	lines = append(lines, ui.C(ui.Current().Muted, "Tip: add with `todo add \"Buy milk\"`"))
-	ui.Panel(lines)
+	lines = append(lines, mutedStyle.Render("Tip: add with `todo add \"Buy milk\"`"))
+	panel(lines)
 	return 0
 }
 
 func doAdd(title string) int {
 	items, err := jsonstore.Load()
 	if err != nil {
-		ui.Fail("load: " + err.Error())
+		fail("load: " + err.Error())
 		return 1
 	}
 	title = strings.TrimSpace(title)
 	if title == "" {
-		ui.Fail("add: empty title")
+		fail("add: empty title")
 		return 2
 	}
 	items = append(items, model.Item{Title: title})
 	if err := jsonstore.Save(items); err != nil {
-		ui.Fail("save: " + err.Error())
+		fail("save: " + err.Error())
 		return 1
 	}
-	ui.OK("added")
+	ok("added")
 	return 0
 }
 
 func doToggle(userIndex int) int {
 	items, err := jsonstore.Load()
 	if err != nil {
-		ui.Fail("load: " + err.Error())
+		fail("load: " + err.Error())
 		return 1
 	}
 	if userIndex < 1 || userIndex > len(items) {
-		ui.Fail(fmt.Sprintf("index out of range: have %d, got %d", len(items), userIndex))
-		fmt.Fprintln(os.Stderr, ui.C("\033[90m", "Hint: run `todo ls` to see valid indexes"))
+		fail(fmt.Sprintf("index out of range: have %d, got %d", len(items), userIndex))
+		fmt.Fprintln(os.Stderr, mutedStyle.Render("Hint: run `todo ls` to see valid indexes"))
 		return 2
 	}
 	idx := userIndex - 1
 	items[idx].Done = !items[idx].Done
 	if err := jsonstore.Save(items); err != nil {
-		ui.Fail("save: " + err.Error())
+		fail("save: " + err.Error())
 		return 1
 	}
-	ui.OK("toggled")
+	ok("toggled")
 	return 0
 }
 
 func doRemove(userIndex int) int {
 	items, err := jsonstore.Load()
 	if err != nil {
-		ui.Fail("load: " + err.Error())
+		fail("load: " + err.Error())
 		return 1
 	}
 	if userIndex < 1 || userIndex > len(items) {
-		ui.Fail(fmt.Sprintf("index out of range: have %d, got %d", len(items), userIndex))
-		fmt.Fprintln(os.Stderr, ui.C("\033[90m", "Hint: run `todo ls` to see valid indexes"))
+		fail(fmt.Sprintf("index out of range: have %d, got %d", len(items), userIndex))
+		fmt.Fprintln(os.Stderr, mutedStyle.Render("Hint: run `todo ls` to see valid indexes"))
 		return 2
 	}
 	idx := userIndex - 1
 	items = append(items[:idx], items[idx+1:]...)
 	if err := jsonstore.Save(items); err != nil {
-		ui.Fail("save: " + err.Error())
+		fail("save: " + err.Error())
 		return 1
 	}
-	ui.OK("removed")
+	ok("removed")
 	return 0
 }
 
@@ -201,48 +242,48 @@ func stats(items []model.Item) (done, pending int) {
 
 func flatLines(items []model.Item) []string {
 	if len(items) == 0 {
-		return []string{ui.C(ui.Current().Muted, "no items")}
+		return []string{mutedStyle.Render("no items")}
 	}
 	out := make([]string, 0, len(items))
 	for i, it := range items {
 		idx := fmt.Sprintf("%2d.", i+1)
-		box := ui.Current().BoxUnchecked
-		color := ui.Current().Muted
+		box := boxUnchecked
+		style := mutedStyle
 		if it.Done {
-			box, color = ui.Current().BoxChecked, ui.Current().Success
+			box, style = boxChecked, successStyle
 		}
 		title := it.Title
 		if len(title) > 80 {
 			title = title[:77] + "..."
 		}
 		out = append(out, fmt.Sprintf("%s %s %s",
-			ui.C("\033[2m", idx), ui.C(color, box), title))
+			mutedStyle.Render(idx), style.Render(box), title))
 	}
 	return out
 }
 
 func groupLines(items []model.Item) []string {
-	var pend, done []model.Item
+	var pend, doneItems []model.Item
 	for _, it := range items {
 		if it.Done {
-			done = append(done, it)
+			doneItems = append(doneItems, it)
 		} else {
 			pend = append(pend, it)
 		}
 	}
 	var lines []string
-	lines = append(lines, ui.C(ui.Current().Accent, "Pending"))
+	lines = append(lines, accentStyle.Render("Pending"))
 	if len(pend) == 0 {
-		lines = append(lines, ui.C(ui.Current().Muted, "(none)"))
+		lines = append(lines, mutedStyle.Render("(none)"))
 	} else {
 		lines = append(lines, flatLines(pend)...)
 	}
 	lines = append(lines, "")
-	lines = append(lines, ui.C(ui.Current().Accent, "Done"))
-	if len(done) == 0 {
-		lines = append(lines, ui.C(ui.Current().Muted, "(none)"))
+	lines = append(lines, accentStyle.Render("Done"))
+	if len(doneItems) == 0 {
+		lines = append(lines, mutedStyle.Render("(none)"))
 	} else {
-		lines = append(lines, flatLines(done)...)
+		lines = append(lines, flatLines(doneItems)...)
 	}
 	return lines
 }
