@@ -2,10 +2,15 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
+	"unsafe"
 
+	"github.com/charmbracelet/bubbles/list"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/idilsaglam/todo/internal/model"
 	"github.com/idilsaglam/todo/internal/store/jsonstore"
@@ -140,28 +145,11 @@ func doList(opt Options) int {
 		return 1
 	}
 
-	// Header + progress
-	d, p := stats(items)
-	header := fmt.Sprintf("%s  %s %d  %s %d  %s %d",
-		titleStyle.Render("Todos"),
-		successStyle.Render("✔"), d,
-		pendingStyle.Render("•"), p,
-		accentStyle.Render("Total"), len(items),
-	)
-
-	var lines []string
-	lines = append(lines, header)
-	lines = append(lines, mutedStyle.Render(progressBar(d, d+p, 28)))
-	lines = append(lines, "")
-
-	if opt.Group {
-		lines = append(lines, groupLines(items)...)
-	} else {
-		lines = append(lines, flatLines(items)...)
+	// Launch interactive TUI list (Bubble Tea). Saves on exit if changed.
+	if err := runInteractiveList(items, opt); err != nil {
+		fail("tui: " + err.Error())
+		return 1
 	}
-	lines = append(lines, "")
-	lines = append(lines, mutedStyle.Render("Tip: add with `todo add \"Buy milk\"`"))
-	panel(lines)
 	return 0
 }
 
@@ -286,4 +274,162 @@ func groupLines(items []model.Item) []string {
 		lines = append(lines, flatLines(doneItems)...)
 	}
 	return lines
+}
+
+// ---------------- Bubble Tea interactive list ----------------
+
+// listItem adapts our model.Item to bubbles/list.Item
+type listItem struct {
+	Text string
+	Done bool
+}
+
+func (i listItem) TitleText() string {
+	box := boxUnchecked
+	style := mutedStyle
+	if i.Done {
+		box, style = boxChecked, successStyle
+	}
+	return fmt.Sprintf("%s %s", style.Render(box), i.Text)
+}
+
+// Implement list.Item interface
+func (i listItem) Title() string       { return i.TitleText() }
+func (i listItem) Description() string { return "" }
+func (i listItem) FilterValue() string { return i.Text }
+
+type modelTUI struct {
+	list     list.Model
+	changed  bool
+	itemsRef *[]model.Item // pointer to original slice to write back updates
+}
+
+// Custom delegate to control how items render (single line)
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                               { return 1 }
+func (d itemDelegate) Spacing() int                              { return 0 }
+func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, item list.Item) {
+	it, _ := item.(listItem)
+	line := it.TitleText()
+	if index == m.Index() {
+		line = lipgloss.NewStyle().Bold(true).Render("> " + it.TitleText())
+	} else {
+		line = "  " + line
+	}
+	fmt.Fprintln(w, line)
+}
+
+// runInteractiveList starts the Bubble Tea list and persists changes when quitting.
+func runInteractiveList(items []model.Item, opt Options) error {
+	// Build items for the list
+	li := make([]list.Item, 0, len(items))
+	for _, it := range items {
+		li = append(li, listItem{Text: it.Title, Done: it.Done})
+	}
+
+	l := list.New(li, itemDelegate{}, 0, 0)
+	l.Title = "Todos"
+	l.SetShowHelp(true)
+	l.SetFilteringEnabled(true)
+	l.Styles.Title = titleStyle
+
+	m := modelTUI{
+		list:     l,
+		itemsRef: &items,
+	}
+
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		return err
+	}
+
+	// Write back list state to items and persist if changed
+	if m.changed {
+		out := make([]model.Item, 0, len(m.list.Items()))
+		for _, it := range m.list.Items() {
+			if li, ok := it.(listItem); ok {
+				out = append(out, model.Item{Title: li.Text, Done: li.Done})
+			}
+		}
+		if err := jsonstore.Save(out); err != nil {
+			return err
+		}
+		ok("saved")
+	}
+	return nil
+}
+
+// Update and View implement Bubble Tea's Model on modelTUI
+func (m modelTUI) Init() tea.Cmd { return nil }
+
+func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "q", "esc":
+			return m, tea.Quit
+		case " ":
+			// toggle done on selected
+			i := m.list.Index()
+			if i >= 0 && i < len(m.list.Items()) {
+				if li, ok := m.list.Items()[i].(listItem); ok {
+					li.Done = !li.Done
+					m.list.SetItem(i, li)
+					m.changed = true
+				}
+			}
+			return m, nil
+		case "d":
+			i := m.list.Index()
+			if i >= 0 && i < len(m.list.Items()) {
+				m.list.RemoveItem(i)
+				m.changed = true
+			}
+			return m, nil
+		}
+	}
+	var cmd tea.Cmd
+	m.list, cmd = m.list.Update(msg)
+	return m, cmd
+}
+
+func (m modelTUI) View() string {
+	// Resize to terminal size every render
+	w, h := widthHeight()
+	m.list.SetSize(w-2, h-4)
+	return panelString(m.list.View())
+}
+
+// helpers for View
+func panelString(inner string) string {
+	border := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1)
+	return border.Render(inner)
+}
+
+func widthHeight() (int, int) {
+	w, h := 80, 24
+	if tw, th, err := termSize(); err == nil {
+		w, h = tw, th
+	}
+	return w, h
+}
+
+// portable terminal size
+func termSize() (int, int, error) {
+	fd := int(os.Stdout.Fd())
+	type winsize struct {
+		Row, Col, Xpixel, Ypixel uint16
+	}
+	ws := &winsize{}
+	_, _, err := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(fd), uintptr(syscall.TIOCGWINSZ), uintptr(unsafe.Pointer(ws)))
+	if err != 0 {
+		return 0, 0, fmt.Errorf("ioctl: %v", err)
+	}
+	return int(ws.Col), int(ws.Row), nil
 }
