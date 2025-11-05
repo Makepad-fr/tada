@@ -319,9 +319,20 @@ type modelTUI struct {
 	changed  bool
 	itemsRef *[]model.Item // pointer to original slice to write back updates
 
+	// Inline add
 	adding bool            // true when inline add is active
-	ti     textinput.Model // text input model for adding
+	ti     textinput.Model // shared text input model (used for add & edit)
 	addErr string          // last add validation error (shown briefly)
+
+	// Inline edit
+	editing   bool // true when inline edit is active
+	editIndex int  // index of item being edited
+	editErr   string
+
+	// Undo support (single-level)
+	canUndo   bool
+	undoIndex int
+	undoItem  *listItem
 }
 
 // Custom delegate to control how items render (single line)
@@ -385,10 +396,12 @@ func runInteractiveList(items []model.Item, opt Options) error {
 	l.FilterInput.Prompt = "/ "
 	l.SetStatusBarItemName("item", "items")
 
-	// Extend help with the new Add key binding
+	// Extend help with Add / Edit / Undo bindings
 	addBind := key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "add"))
-	l.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{addBind, kb.Toggle, kb.Delete, kb.Quit} }
-	l.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{addBind, kb.Toggle, kb.Delete, kb.Quit} }
+	editBind := key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit"))
+	undoBind := key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "undo"))
+	l.AdditionalShortHelpKeys = func() []key.Binding { return []key.Binding{addBind, editBind, undoBind, kb.Toggle, kb.Delete, kb.Quit} }
+	l.AdditionalFullHelpKeys = func() []key.Binding { return []key.Binding{addBind, editBind, undoBind, kb.Toggle, kb.Delete, kb.Quit} }
 
 	m := modelTUI{
 		list:     l,
@@ -460,6 +473,39 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// When in edit mode, route keys to the text input
+	if m.editing {
+		var cmd tea.Cmd
+		switch x := msg.(type) {
+		case tea.KeyMsg:
+			switch x.String() {
+			case "enter":
+				title := strings.TrimSpace(m.ti.Value())
+				if title == "" {
+					m.editErr = "Title cannot be empty"
+					return m, nil
+				}
+				// apply edit to item at editIndex
+				if m.editIndex >= 0 && m.editIndex < len(m.list.Items()) {
+					if li, ok := m.list.Items()[m.editIndex].(listItem); ok {
+						li.Text = title
+						m.list.SetItem(m.editIndex, li)
+						m.changed = true
+					}
+				}
+				m.ti.SetValue("")
+				m.editing = false
+				return m, nil
+			case "esc":
+				m.editing = false
+				m.ti.SetValue("")
+				return m, nil
+			}
+		}
+		m.ti, cmd = m.ti.Update(msg)
+		return m, cmd
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -479,6 +525,13 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "d":
 			i := m.list.Index()
 			if i >= 0 && i < len(m.list.Items()) {
+				// stash item for undo before removal
+				if li, ok := m.list.Items()[i].(listItem); ok {
+					tmp := li
+					m.undoItem = &tmp
+					m.undoIndex = i
+					m.canUndo = true
+				}
 				m.list.RemoveItem(i)
 				m.changed = true
 			}
@@ -487,6 +540,35 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.adding = true
 			m.ti.SetValue("")
 			m.ti.Placeholder = "New item title..."
+			return m, nil
+		case "e":
+			i := m.list.Index()
+			if i >= 0 && i < len(m.list.Items()) {
+				if li, ok := m.list.Items()[i].(listItem); ok {
+					m.editing = true
+					m.editIndex = i
+					m.ti.SetValue(li.Text)
+					m.ti.CursorEnd()
+					m.ti.Placeholder = "Edit item title..."
+					return m, nil
+				}
+			}
+			return m, nil
+		case "u":
+			if m.canUndo && m.undoItem != nil {
+				// clamp index in case list got shorter
+				idx := m.undoIndex
+				if idx < 0 {
+					idx = 0
+				}
+				if idx > len(m.list.Items()) {
+					idx = len(m.list.Items())
+				}
+				m.list.InsertItem(idx, *m.undoItem)
+				m.changed = true
+				m.canUndo = false
+				m.undoItem = nil
+			}
 			return m, nil
 		}
 	}
@@ -498,9 +580,9 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m modelTUI) View() string {
 	// Resize to terminal size every render
 	w, h := widthHeight()
-	// Leave space for the inline add bar when active
+	// Leave space for the inline bar when active
 	listHeight := h - 4
-	if m.adding {
+	if m.adding || m.editing {
 		listHeight = h - 6
 	}
 	m.list.SetSize(w-2, listHeight)
@@ -508,12 +590,18 @@ func (m modelTUI) View() string {
 	// Base view
 	content := m.list.View()
 
-	// Inline add bar
-	if m.adding {
+	// Inline bars
+	if m.adding || m.editing {
 		bar := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(0, 1)
 		title := "Add new item"
-		if m.addErr != "" {
+		if m.editing {
+			title = "Edit item"
+		}
+		if m.addErr != "" && m.adding {
 			title += " — " + errorStyle.Render(m.addErr)
+		}
+		if m.editErr != "" && m.editing {
+			title += " — " + errorStyle.Render(m.editErr)
 		}
 		inputLine := title + "\n" + m.ti.View()
 		content = content + "\n" + bar.Render(inputLine)
