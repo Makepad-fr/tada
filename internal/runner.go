@@ -1,5 +1,6 @@
-package cli
+package internal
 
+//runner.go orchestrates subcommands (add, ls, done, rm). For ls, it launches the Bubble Tea TUI.
 import (
 	"fmt"
 	"io"
@@ -14,8 +15,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/idilsaglam/todo/internal/model"
-	"github.com/idilsaglam/todo/internal/store/jsonstore"
 )
 
 // Options tune output behavior from root flags.
@@ -156,7 +155,7 @@ Examples:
 // -------------- subcommand impls ----------------
 
 func doList(opt Options) int {
-	items, err := jsonstore.Load()
+	items, err := Load()
 	if err != nil {
 		fail("load: " + err.Error())
 		return 1
@@ -171,7 +170,7 @@ func doList(opt Options) int {
 }
 
 func doAdd(title string) int {
-	items, err := jsonstore.Load()
+	items, err := Load()
 	if err != nil {
 		fail("load: " + err.Error())
 		return 1
@@ -181,8 +180,8 @@ func doAdd(title string) int {
 		fail("add: empty title")
 		return 2
 	}
-	items = append(items, model.Item{Title: title})
-	if err := jsonstore.Save(items); err != nil {
+	items = append(items, Item{Title: title})
+	if err := Save(items); err != nil {
 		fail("save: " + err.Error())
 		return 1
 	}
@@ -191,7 +190,7 @@ func doAdd(title string) int {
 }
 
 func doToggle(userIndex int) int {
-	items, err := jsonstore.Load()
+	items, err := Load()
 	if err != nil {
 		fail("load: " + err.Error())
 		return 1
@@ -203,7 +202,7 @@ func doToggle(userIndex int) int {
 	}
 	idx := userIndex - 1
 	items[idx].Done = !items[idx].Done
-	if err := jsonstore.Save(items); err != nil {
+	if err := Save(items); err != nil {
 		fail("save: " + err.Error())
 		return 1
 	}
@@ -212,7 +211,7 @@ func doToggle(userIndex int) int {
 }
 
 func doRemove(userIndex int) int {
-	items, err := jsonstore.Load()
+	items, err := Load()
 	if err != nil {
 		fail("load: " + err.Error())
 		return 1
@@ -224,7 +223,7 @@ func doRemove(userIndex int) int {
 	}
 	idx := userIndex - 1
 	items = append(items[:idx], items[idx+1:]...)
-	if err := jsonstore.Save(items); err != nil {
+	if err := Save(items); err != nil {
 		fail("save: " + err.Error())
 		return 1
 	}
@@ -234,7 +233,7 @@ func doRemove(userIndex int) int {
 
 // -------------- rendering helpers --------------
 
-func stats(items []model.Item) (done, pending int) {
+func stats(items []Item) (done, pending int) {
 	for _, it := range items {
 		if it.Done {
 			done++
@@ -245,7 +244,7 @@ func stats(items []model.Item) (done, pending int) {
 	return
 }
 
-func flatLines(items []model.Item) []string {
+func flatLines(items []Item) []string {
 	if len(items) == 0 {
 		return []string{mutedStyle.Render("no items")}
 	}
@@ -267,8 +266,8 @@ func flatLines(items []model.Item) []string {
 	return out
 }
 
-func groupLines(items []model.Item) []string {
-	var pend, doneItems []model.Item
+func groupLines(items []Item) []string {
+	var pend, doneItems []Item
 	for _, it := range items {
 		if it.Done {
 			doneItems = append(doneItems, it)
@@ -317,7 +316,7 @@ func (i listItem) FilterValue() string { return i.Text }
 type modelTUI struct {
 	list     list.Model
 	changed  bool
-	itemsRef *[]model.Item // pointer to original slice to write back updates
+	itemsRef *[]Item // pointer to original slice to write back updates
 
 	// Inline add
 	adding bool            // true when inline add is active
@@ -367,7 +366,7 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, item list.Ite
 }
 
 // runInteractiveList starts the Bubble Tea list and persists changes when quitting.
-func runInteractiveList(items []model.Item, opt Options) error {
+func runInteractiveList(items []Item, opt Options) error {
 	// Build items for the list
 	li := make([]list.Item, 0, len(items))
 	for _, it := range items {
@@ -426,13 +425,13 @@ func runInteractiveList(items []model.Item, opt Options) error {
 
 	// Write back list state to items and persist if changed
 	if fm.changed {
-		out := make([]model.Item, 0, len(fm.list.Items()))
+		out := make([]Item, 0, len(fm.list.Items()))
 		for _, it := range fm.list.Items() {
 			if li, ok := it.(listItem); ok {
-				out = append(out, model.Item{Title: li.Text, Done: li.Done})
+				out = append(out, Item{Title: li.Text, Done: li.Done})
 			}
 		}
-		if err := jsonstore.Save(out); err != nil {
+		if err := Save(out); err != nil {
 			return err
 		}
 		ok("saved")
@@ -461,11 +460,13 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.changed = true
 				// reset input and exit add mode
 				m.ti.SetValue("")
+				m.ti.Blur()
 				m.adding = false
 				return m, nil
 			case "esc":
 				m.adding = false
 				m.ti.SetValue("")
+				m.ti.Blur()
 				return m, nil
 			}
 		}
@@ -494,11 +495,13 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.ti.SetValue("")
+				m.ti.Blur()
 				m.editing = false
 				return m, nil
 			case "esc":
 				m.editing = false
 				m.ti.SetValue("")
+				m.ti.Blur()
 				return m, nil
 			}
 		}
@@ -540,6 +543,7 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.adding = true
 			m.ti.SetValue("")
 			m.ti.Placeholder = "New item title..."
+			m.ti.Focus()
 			return m, nil
 		case "e":
 			i := m.list.Index()
@@ -550,6 +554,7 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.ti.SetValue(li.Text)
 					m.ti.CursorEnd()
 					m.ti.Placeholder = "Edit item title..."
+					m.ti.Focus()
 					return m, nil
 				}
 			}

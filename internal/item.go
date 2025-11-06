@@ -1,4 +1,4 @@
-package model
+package internal
 
 // Item is the domain model for a todo entry.
 type Item struct {

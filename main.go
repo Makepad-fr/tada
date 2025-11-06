@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/idilsaglam/todo/internal/cli"
+	"github.com/Makepad-fr/tada/internal"
 )
 
 func main() {
@@ -16,11 +16,11 @@ func main() {
 	// Hand the remaining args to the CLI runner.
 	args := flag.Args()
 	if len(args) == 0 {
-		cli.PrintHelp()
+		internal.PrintHelp()
 		os.Exit(2)
 	}
 
-	code := cli.Run(args, cli.Options{
+	code := internal.Run(args, internal.Options{
 		Group: *groupPending,
 	})
 	if code != 0 {

@@ -1,4 +1,4 @@
-package jsonstore
+package internal
 
 import (
 	"encoding/json"
@@ -6,12 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"github.com/idilsaglam/todo/internal/model"
 )
-
-// JSON-backed storage. Single file, human-readable, portable.
-// No locking for v1; fine for a local single-user CLI.
 
 const dataFileName = "todos.json"
 
@@ -23,7 +18,7 @@ func dataPath() (string, error) {
 	return filepath.Join(wd, dataFileName), nil
 }
 
-func Load() ([]model.Item, error) {
+func Load() ([]Item, error) {
 	p, err := dataPath()
 	if err != nil {
 		return nil, err
@@ -31,18 +26,18 @@ func Load() ([]model.Item, error) {
 	b, err := os.ReadFile(p)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return []model.Item{}, nil
+			return []Item{}, nil
 		}
 		return nil, fmt.Errorf("read file: %w", err)
 	}
-	var items []model.Item
+	var items []Item
 	if err := json.Unmarshal(b, &items); err != nil {
 		return nil, fmt.Errorf("json unmarshal: %w", err)
 	}
 	return items, nil
 }
 
-func Save(items []model.Item) error {
+func Save(items []Item) error {
 	p, err := dataPath()
 	if err != nil {
 		return err

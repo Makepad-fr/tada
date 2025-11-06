@@ -1,4 +1,4 @@
-module github.com/idilsaglam/todo
+module github.com/Makepad-fr/tada
 
 go 1.24.3
 
