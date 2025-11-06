@@ -2,12 +2,14 @@ package internal
 
 //runner.go orchestrates subcommands (add, ls, done, rm). For ls, it launches the Bubble Tea TUI.
 import (
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -124,6 +126,25 @@ func Run(args []string, opt Options) int {
 			return 2
 		}
 		return doRemove(n)
+	case "auth":
+		if len(a) == 0 {
+			fail("usage: todo auth <login|logout|status|whoami>")
+			return 2
+		}
+		sub := a[0]
+		switch sub {
+		case "login":
+			return doAuthLogin()
+		case "logout":
+			return doAuthLogout()
+		case "status":
+			return doAuthStatus()
+		case "whoami":
+			return doAuthWhoAmI()
+		default:
+			fail("usage: todo auth <login|logout|status|whoami>")
+			return 2
+		}
 	}
 
 	fail("unknown subcommand: " + cmd)
@@ -143,6 +164,7 @@ Subcommands:
   ls                 List items
   done <index>       Toggle done for item at 1-based index
   rm <index>         Remove item at 1-based index
+  auth <login|logout|status|whoami>   Token authentication
 
 Examples:
   todo add "Buy milk"
@@ -150,6 +172,105 @@ Examples:
   todo done 2
   todo rm 3
 `)
+}
+
+// -------------- auth subcommands & helpers --------------
+
+func doAuthLogin() int {
+	fmt.Print("Paste your token: ")
+	var token string
+	if _, err := fmt.Scanln(&token); err != nil {
+		fail("read token: " + err.Error())
+		return 1
+	}
+	if err := SetToken(token, nil); err != nil {
+		fail("save token: " + err.Error())
+		return 1
+	}
+	ok("logged in")
+	return 0
+}
+
+func doAuthLogout() int {
+	ti, _ := GetToken()
+	if ti != nil && ti.Source == "env" {
+		ok("token is provided by TADA_TOKEN env var (nothing to delete)")
+		return 0
+	}
+	if err := DeleteToken(); err != nil {
+		fail("logout: " + err.Error())
+		return 1
+	}
+	ok("logged out")
+	return 0
+}
+
+func doAuthStatus() int {
+	ti, _ := GetToken()
+	if ti == nil {
+		fmt.Println(mutedStyle.Render("not logged in"))
+		fmt.Println("Run: todo auth login")
+		return 0
+	}
+	fmt.Printf("source: %s\n", ti.Source)
+	if ti.ExpiresAt != nil {
+		fmt.Printf("expires: %s\n", ti.ExpiresAt.UTC().Format(time.RFC3339))
+	} else {
+		fmt.Println("expires: (unknown)")
+	}
+	fmt.Println("env override: TADA_TOKEN")
+	return 0
+}
+
+// whoami tries to decode JWT locally (unsigned); opaque tokens print basic info.
+func doAuthWhoAmI() int {
+	ti, _ := GetToken()
+	if ti == nil {
+		fail("not logged in. Run: todo auth login")
+		return 2
+	}
+	token := ti.Token
+	parts := strings.Split(token, ".")
+	if len(parts) == 3 {
+		payloadB64 := parts[1]
+		// add padding if needed
+		switch len(payloadB64) % 4 {
+		case 2:
+			payloadB64 += "=="
+		case 3:
+			payloadB64 += "="
+		}
+		if p, err := decodeB64URL(payloadB64); err == nil {
+			fmt.Println("JWT payload:")
+			fmt.Println(p)
+			return 0
+		}
+	}
+	fmt.Println("Opaque token (cannot introspect locally).")
+	fmt.Println("source:", ti.Source)
+	return 0
+}
+
+func decodeB64URL(s string) (string, error) {
+	dec, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		dec2, err2 := base64.URLEncoding.DecodeString(s)
+		if err2 != nil {
+			return "", err
+		}
+		return string(dec2), nil
+	}
+	return string(dec), nil
+}
+
+// use in future networked commands to require auth
+func ensureAuth() (*TokenInfo, int) {
+	ti, _ := GetToken()
+	if ti == nil || strings.TrimSpace(ti.Token) == "" {
+		fail("no token found. Set TADA_TOKEN or run `todo auth login`")
+		return nil, 2
+	}
+	return ti, 0
 }
 
 // -------------- subcommand impls ----------------
@@ -545,6 +666,7 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ti.Placeholder = "New item title..."
 			m.ti.Focus()
 			return m, nil
+
 		case "e":
 			i := m.list.Index()
 			if i >= 0 && i < len(m.list.Items()) {
@@ -576,6 +698,7 @@ func (m modelTUI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+
 	}
 	var cmd tea.Cmd
 	m.list, cmd = m.list.Update(msg)
